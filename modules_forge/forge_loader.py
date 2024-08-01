@@ -18,6 +18,7 @@ from ldm.util import instantiate_from_config
 from modules_forge import forge_clip
 from modules_forge.unet_patcher import UnetPatcher
 from ldm_patched.modules.model_base import model_sampling, ModelType
+from ldm_patched.modules.supported_models import Flux, FluxSchnell
 
 import open_clip
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -86,6 +87,43 @@ def load_checkpoint_guess_config(sd, output_vae=True, output_clip=True, output_c
 
     model_config = model_detection.model_config_from_unet(sd, diffusion_model_prefix)
     if model_config is None:
+        # Check for Flux model
+        if "double_blocks.0.img_attn.norm.key_norm.scale" in sd.keys():
+            unet_config = {
+                "image_model": "flux",
+                "guidance_embed": True,
+                "in_channels": 64,
+                "vec_in_dim": 768,
+                "context_in_dim": 4096,
+                "hidden_size": 3072,
+                "mlp_ratio": 4.0,
+                "num_heads": 24,
+                "depth": 19,
+                "depth_single_blocks": 38,
+                "axes_dim": [16, 56, 56],
+                "theta": 10000,
+                "qkv_bias": True,
+            }
+            model_config = Flux(unet_config=unet_config)
+        elif "transformer_blocks.0.attn.add_q_proj.weight" in sd.keys():
+            unet_config = {
+                "image_model": "flux",
+                "guidance_embed": False,
+                "in_channels": 64,
+                "vec_in_dim": 768,
+                "context_in_dim": 4096,
+                "hidden_size": 3072,
+                "mlp_ratio": 4.0,
+                "num_heads": 24,
+                "depth": 19,
+                "depth_single_blocks": 38,
+                "axes_dim": [16, 56, 56],
+                "theta": 10000,
+                "qkv_bias": True,
+            }
+            model_config = FluxSchnell(unet_config=unet_config)
+    
+    if model_config is None:
         raise RuntimeError("ERROR: Could not detect model type")
 
     if dtype is None:
@@ -143,6 +181,7 @@ def load_checkpoint_guess_config(sd, output_vae=True, output_clip=True, output_c
 
 @torch.no_grad()
 def load_model_for_a1111(timer, checkpoint_info=None, state_dict=None):
+    from ldm_patched.modules.text_encoders.flux import FluxClipModel, FluxTokenizer
     a1111_config_filename = find_checkpoint_config(state_dict, checkpoint_info)
     a1111_config = OmegaConf.load(a1111_config_filename)
     timer.record("forge solving config")
@@ -174,11 +213,42 @@ def load_model_for_a1111(timer, checkpoint_info=None, state_dict=None):
     sd_model.forge_objects_after_applying_lora = forge_objects.shallow_copy()
     timer.record("forge load real models")
 
-    sd_model.first_stage_model = forge_objects.vae.first_stage_model
-    sd_model.model.diffusion_model = forge_objects.unet.model.diffusion_model
+    # Check if it's a Flux model
+    is_flux_model = isinstance(forge_objects.unet.model.model_config, (Flux, FluxSchnell))
+
+    if is_flux_model:
+        # Handle Flux model
+        sd_model.first_stage_model = None  # Flux doesn't use VAE
+        sd_model.model.diffusion_model = forge_objects.unet.model.diffusion_model
+        
+        # Create custom CLIP model for Flux if not provided
+        if forge_objects.clip is None:
+            print("Creating custom CLIP model for Flux")
+            device = next(sd_model.model.diffusion_model.parameters()).device
+            dtype = next(sd_model.model.diffusion_model.parameters()).dtype
+            try:
+                sd_model.cond_stage_model = FluxClipModel(device=device, dtype=dtype)
+            except Exception as e:
+                print(f"Error creating FluxClipModel: {e}")
+                print("Falling back to standard CLIP model")
+                sd_model.cond_stage_model = sd1_clip.SDClipModel(device=device, dtype=dtype)
+        else:
+            sd_model.cond_stage_model = forge_objects.clip
+        
+        sd_model.is_flux = True
+        sd_model.latent_channels = forge_objects.unet.model.model_config.unet_config.get('in_channels', 64)
+    else:
+        # Handle standard SD models
+        sd_model.first_stage_model = forge_objects.vae.first_stage_model
+        sd_model.model.diffusion_model = forge_objects.unet.model.diffusion_model
+        sd_model.is_flux = False
+        sd_model.latent_channels = 4
 
     conditioner = getattr(sd_model, 'conditioner', None)
-    if conditioner:
+    if is_flux_model:
+        # Skip the standard CLIP model setup for Flux models
+        pass
+    elif conditioner:
         text_cond_models = []
 
         for i in range(len(conditioner.embedders)):
@@ -234,7 +304,6 @@ def load_model_for_a1111(timer, checkpoint_info=None, state_dict=None):
         sd_model.forge_objects.unet.model.model_sampling = model_sampling(sd_model.forge_objects.unet.model.model_config, ModelType.V_PREDICTION)
 
     sd_model.is_sd3 = False
-    sd_model.latent_channels = 4
     sd_model.is_sdxl = conditioner is not None
     sd_model.is_sdxl_inpaint = sd_model.is_sdxl and forge_objects.unet.model.diffusion_model.in_channels == 9
     sd_model.is_sd2 = not sd_model.is_sdxl and hasattr(sd_model.cond_stage_model, 'model')
@@ -248,20 +317,24 @@ def load_model_for_a1111(timer, checkpoint_info=None, state_dict=None):
 
     @torch.inference_mode()
     def patched_decode_first_stage(x):
+        if sd_model.is_flux:
+            return x  # Flux models don't use VAE
         sample = sd_model.forge_objects.unet.model.model_config.latent_format.process_out(x)
         sample = sd_model.forge_objects.vae.decode(sample).movedim(-1, 1) * 2.0 - 1.0
         return sample.to(x)
 
     @torch.inference_mode()
     def patched_encode_first_stage(x):
+        if sd_model.is_flux:
+            return x  # Flux models don't use VAE
         sample = sd_model.forge_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5)
         sample = sd_model.forge_objects.unet.model.model_config.latent_format.process_in(sample)
         return sample.to(x)
 
-    sd_model.ema_scope = lambda *args, **kwargs: contextlib.nullcontext()
-    sd_model.get_first_stage_encoding = lambda x: x
     sd_model.decode_first_stage = patched_decode_first_stage
     sd_model.encode_first_stage = patched_encode_first_stage
+    sd_model.ema_scope = lambda *args, **kwargs: contextlib.nullcontext()
+    sd_model.get_first_stage_encoding = lambda x: x
     sd_model.clip = sd_model.cond_stage_model
     sd_model.tiling_enabled = False
     timer.record("forge finalize")

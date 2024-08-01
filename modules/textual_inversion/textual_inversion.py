@@ -18,6 +18,7 @@ from modules.textual_inversion.learn_schedule import LearnRateScheduler
 
 from modules.textual_inversion.image_embedding import embedding_to_b64, embedding_from_b64, insert_image_data_embed, extract_image_data_embed, caption_image_overlay
 from modules.textual_inversion.saving_settings import save_settings_to_file
+from ldm_patched.modules.text_encoders.flux import FluxClipModel
 
 
 TextualInversionTemplate = namedtuple("TextualInversionTemplate", ["name", "path"])
@@ -150,9 +151,17 @@ class EmbeddingDatabase:
         return embedding
 
     def get_expected_shape(self):
-        devices.torch_npu_set_device()
-        vec = shared.sd_model.cond_stage_model.encode_embedding_init_text(",", 1)
-        return vec.shape[1]
+        if isinstance(shared.sd_model.cond_stage_model, FluxClipModel):
+            vec = shared.sd_model.cond_stage_model.encode_embedding_init_text(",", 1)
+            if vec is None:  # Check if we received a valid output
+                print("Warning: Expected shape cannot be determined for Flux model.")
+                return (0,)  # or handle appropriately
+            return vec.shape[-1]  # Return the last dimension
+        else:
+            vec = shared.sd_model.cond_stage_model.encode_embedding_init_text(",", 1)
+            if vec is None:  # Check if we received a valid output
+                return (0,)  # or handle appropriately
+            return vec.shape[-1]  # Return the last dimension
 
     def load_from_file(self, path, filename):
         name, ext = os.path.splitext(filename)
@@ -223,7 +232,17 @@ class EmbeddingDatabase:
         self.ids_lookup.clear()
         self.word_embeddings.clear()
         self.skipped_embeddings.clear()
-        self.expected_shape = self.get_expected_shape()
+        
+        try:
+            self.expected_shape = self.get_expected_shape()
+        except Exception as e:
+            print(f"Error getting expected shape: {e}")
+            print("Skipping textual inversion embeddings")
+            return
+
+        if isinstance(shared.sd_model.cond_stage_model, FluxClipModel):
+            print("Skipping textual inversion embeddings for Flux model")
+            return
 
         for embdir in self.embedding_dirs.values():
             self.load_from_dir(embdir)

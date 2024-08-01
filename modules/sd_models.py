@@ -166,7 +166,7 @@ def list_models():
     else:
         model_url = "https://huggingface.co/lllyasviel/fav_models/resolve/main/fav/realisticVisionV51_v51VAE.safetensors"
 
-    model_list = modelloader.load_models(model_path=model_path, model_url=model_url, command_path=shared.cmd_opts.ckpt_dir, ext_filter=[".ckpt", ".safetensors"], download_name="realisticVisionV51_v51VAE.safetensors", ext_blacklist=[".vae.ckpt", ".vae.safetensors"])
+    model_list = modelloader.load_models(model_path=model_path, model_url=model_url, command_path=shared.cmd_opts.ckpt_dir, ext_filter=[".ckpt", ".safetensors", ".sft"], download_name="realisticVisionV51_v51VAE.safetensors", ext_blacklist=[".vae.ckpt", ".vae.safetensors"])
 
     if os.path.exists(cmd_ckpt):
         checkpoint_info = CheckpointInfo(cmd_ckpt)
@@ -586,19 +586,21 @@ class SdModelData:
 
 model_data = SdModelData()
 
-
+from ldm_patched.modules.text_encoders.flux import FluxClipModel
 def get_empty_cond(sd_model):
 
     p = processing.StableDiffusionProcessingTxt2Img()
     extra_networks.activate(p, {})
 
-    if hasattr(sd_model, 'get_learned_conditioning'):
+    if isinstance(sd_model.cond_stage_model, FluxClipModel):
+        d = sd_model.cond_stage_model([""])
+    elif hasattr(sd_model, 'get_learned_conditioning'):
         d = sd_model.get_learned_conditioning([""])
     else:
         d = sd_model.cond_stage_model([""])
 
     if isinstance(d, dict):
-        d = d['crossattn']
+        d = d.get('crossattn', d)  # Use 'crossattn' if available, otherwise use the whole dict
 
     return d
 
@@ -682,9 +684,14 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None):
     shared.opts.data["sd_checkpoint_hash"] = checkpoint_info.sha256
     sd_vae.delete_base_vae()
     sd_vae.clear_loaded_vae()
-    vae_file, vae_source = sd_vae.resolve_vae(checkpoint_info.filename).tuple()
-    sd_vae.load_vae(sd_model, vae_file, vae_source)
-    timer.record("load VAE")
+
+    # Check if the model is a Flux model
+    if not getattr(sd_model, 'is_flux', False):
+        sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings(force_reload=True)
+        timer.record("load textual inversion embeddings")
+    else:
+        print("Skipping textual inversion embeddings for Flux model")
+        timer.record("skip textual inversion embeddings for Flux")
 
     sd_hijack.model_hijack.embedding_db.load_textual_inversion_embeddings(force_reload=True)
     timer.record("load textual inversion embeddings")

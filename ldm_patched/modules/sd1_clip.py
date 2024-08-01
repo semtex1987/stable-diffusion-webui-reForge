@@ -180,9 +180,19 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
     # Taken from https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/sd1_clip.py
     # This function is only for reference, and not used in the backend or runtime.
     def forward(self, tokens):
+        if not tokens or not tokens[0]:
+            # Return empty tensors if no tokens
+            return torch.empty(1, 0, self.transformer.config.hidden_size, device=self.device), None
+        if isinstance(tokens[0][0], (int, torch.Tensor)):
+            # If tokens are already in the correct format, use them directly
+            tokens_for_embedding = tokens
+        else:
+            # If tokens are in the format from tokenize_with_weights, convert them
+            tokens_for_embedding = [[t[0] for t in token_list] for token_list in tokens]
+
         backup_embeds = self.transformer.get_input_embeddings()
         device = backup_embeds.weight.device
-        tokens = self.set_up_textual_embeddings(tokens, backup_embeds)
+        tokens = self.set_up_textual_embeddings(tokens_for_embedding, backup_embeds)
         tokens = torch.LongTensor(tokens).to(device)
 
         attention_mask = None
@@ -195,22 +205,20 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
                     if tokens[x, y] == max_token:
                         break
 
-        outputs = self.transformer(tokens, attention_mask, intermediate_output=self.layer_idx, final_layer_norm_intermediate=self.layer_norm_hidden_state)
+        outputs = self.transformer(input_ids=tokens, attention_mask=attention_mask)
         self.transformer.set_input_embeddings(backup_embeds)
 
         if self.layer == "last":
-            z = outputs[0]
+            z = outputs.last_hidden_state
         else:
-            z = outputs[1]
+            z = outputs.hidden_states[self.layer_idx]
 
-        pooled_output = None
-        if len(outputs) >= 3:
-            if not self.return_projected_pooled and len(outputs) >= 4 and outputs[3] is not None:
-                pooled_output = outputs[3].float()
-            elif outputs[2] is not None:
-                pooled_output = outputs[2].float()
+        pooled_output = outputs.pooler_output if hasattr(outputs, 'pooler_output') else None
 
-        return z.float(), pooled_output
+        if self.layer_norm_hidden_state:
+            z = self.transformer.text_model.final_layer_norm(z)
+
+        return z.float(), pooled_output.float() if pooled_output is not None else None
 
     def encode(self, tokens):
         return self(tokens)

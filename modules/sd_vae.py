@@ -26,6 +26,9 @@ def get_loaded_vae_name():
 
     return os.path.basename(loaded_vae_file)
 
+def is_flux_model(model):
+    return getattr(model, 'is_flux', False)
+
 
 def get_loaded_vae_hash():
     if loaded_vae_file is None:
@@ -43,6 +46,9 @@ def get_base_vae(model):
 
 
 def store_base_vae(model):
+    if is_flux_model(model):
+        print("Skipping base VAE storage for Flux model")
+        return
     global base_vae, checkpoint_info
     if checkpoint_info != model.sd_checkpoint_info:
         assert not loaded_vae_file, "Trying to store non-base VAE!"
@@ -192,6 +198,9 @@ def load_vae_dict(filename, map_location):
 
 
 def load_vae(model, vae_file=None, vae_source="from unknown source"):
+    if is_flux_model(model):
+        print("Skipping VAE loading for Flux model")
+        return
     global vae_dict, base_vae, loaded_vae_file
     # save_settings = False
 

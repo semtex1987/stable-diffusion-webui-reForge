@@ -40,6 +40,7 @@ path_dirs = [
     (os.path.join(sd_path, '../generative-models'), 'sgm', 'Stable Diffusion XL', ["sgm"]),
     (os.path.join(sd_path, '../BLIP'), 'models/blip.py', 'BLIP', []),
     (os.path.join(sd_path, '../k-diffusion'), 'k_diffusion/sampling.py', 'k_diffusion', ["atstart"]),
+    (os.path.join(sd_path, '../huggingface_guess'), 'huggingface_guess/detection.py', 'huggingface_guess', []),
 ]
 
 paths = {}
@@ -62,13 +63,3 @@ for d, must_exist, what, options in path_dirs:
         else:
             sys.path.append(d)
         paths[what] = d
-
-
-import ldm_patched.utils.path_utils as ldm_patched_path_utils
-
-ldm_patched_path_utils.base_path = data_path
-ldm_patched_path_utils.models_dir = models_path
-ldm_patched_path_utils.output_directory = os.path.join(data_path, "output")
-ldm_patched_path_utils.temp_directory = os.path.join(data_path, "temp")
-ldm_patched_path_utils.input_directory = os.path.join(data_path, "input")
-ldm_patched_path_utils.user_directory = os.path.join(data_path, "user")
